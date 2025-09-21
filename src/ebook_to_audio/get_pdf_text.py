@@ -26,10 +26,7 @@ from urllib.parse import urlparse
 import bs4
 import crawlpdfnames as cpn
 import cv2
-import ebook_to_audio as e2a
 import ebooklib
-import epub_toc
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import popplerqt5
@@ -37,13 +34,15 @@ import PyQt5
 import readabilipy as rp
 import readtime
 import tqdm
-from ebook_to_audio import types
-from ebook_to_audio.html_split import html_split
-from ebook_to_audio.types import RunArgs
 from loguru import logger
 from PIL import Image
 from PyQt5.QtCore import QBuffer
 from PyQt5.QtGui import QImage
+
+import ebook_to_audio as e2a
+from ebook_to_audio import types
+from ebook_to_audio.html_split import html_split
+from ebook_to_audio.types import RunArgs
 
 
 def _get_page_text(page):
@@ -207,13 +206,16 @@ def get_text_poppler_line_split(args: RunArgs):
         new_indices = []
         for split in toc_dict.get(i+1, []):
             top = split.ld.top()
+            if top > 1:
+                top = 1
+
             s0 = int(top * bm.shape[0])
             logger.info(f"{i}: {split.title} [{s0}]")
-            if top > 1:
-                breakpoint()
+            new = (s0, split)
+
             #indices.append( (s0, 'toc_item'))
             #new_indices.append( (s0, split.title + f" {split.ld.toString()}"))
-            new_indices.append( (s0, split))
+            new_indices.append(new)
 
         indices = indices + new_indices
 
@@ -254,7 +256,7 @@ def get_text_poppler_line_split(args: RunArgs):
         # Set those indices to solid lines
         bm2 = np.zeros_like(bm)
         for item in indices:
-            bm2[item[0], :] = 255
+            bm2[item[0]-1, :] = 255
 
         #show_mask(pil_img, vlines)
         #show_mask(pil_img, bm2)

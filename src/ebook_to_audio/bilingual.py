@@ -14,10 +14,11 @@ import wave
 
 import argostranslate.package
 import argostranslate.translate
-import ebook_to_audio as e2a
 import mutagen.mp3
 from loguru import logger
 from mutagen.id3 import ID3, SYLT, Encoding
+
+import ebook_to_audio as e2a
 
 # Why does this sentence not translate from english to spanish?
 # ’He was educated Upper Canada College, Toronto, at Eton, at the University of Strasbourg and, after a spell of National Service in the Navy, at New College, Oxford, where he took a degree in French and Russian.’
@@ -119,8 +120,8 @@ def perform_tts_bilingual(
     tempdir,
     translation
 ):
-    from_code = "en"
-    to_code = "es"
+    from_code = "de"
+    to_code = "en"
     model0 = '/home/nate/piper/models/en_GB-alan-medium.onnx'
     model1 = '/home/nate/piper/models/es_MX-claude-high.onnx'
     piper_exe_path = "/home/nate/piper/install/piper"
@@ -219,8 +220,8 @@ def _convert_text_bilingual(
     ''' Generates (Track, Outfile) pairs for speech synthesis.'''
     item_num = 0
 
-    from_code = "en"
-    to_code = "es"
+    from_code = "es"
+    to_code = "en"
     from_lang, to_lang = get_languages(from_code, to_code)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=FutureWarning)

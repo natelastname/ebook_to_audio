@@ -6,12 +6,14 @@ Created on 2025-03-16T19:53:19-04:00
 @author: nate
 """
 
+import re
 from copy import copy
 from typing import Callable
 
 import bs4
 import ebooklib
 import pandas as pd
+
 from ebook_to_audio.types import RunArgs
 
 
@@ -33,7 +35,7 @@ def html_split(html_str, group_name, ids):
     while True:
         item = item.next_element
         if not item:
-            yield top_level, text
+            yield top_level, top_level, text
             break
 
         if isinstance(item, bs4.NavigableString):
@@ -47,7 +49,12 @@ def html_split(html_str, group_name, ids):
         if top_level:
             with_frag += f"#{top_level}"
 
-        yield with_frag, text
+
+        out_name = with_frag
+        if re.match('h[0-9]+', item.name):
+            out_name = item.text
+
+        yield out_name, with_frag, text
 
         top_level = id0
         text = ""

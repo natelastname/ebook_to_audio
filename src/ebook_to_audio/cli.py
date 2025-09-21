@@ -16,12 +16,13 @@ import sys
 import tempfile
 
 import bs4
-import ebook_to_audio as e2a
-import feud
 import rich_click as click
-from dataclass_click import argument, dataclass_click, option, register_type_inference
-from ebook_to_audio.types import RunArgs, SplitArgs, TOCStrat
+from dataclass_click import (argument, dataclass_click, option,
+                             register_type_inference)
 from loguru import logger
+
+import ebook_to_audio as e2a
+from ebook_to_audio.types import RunArgs, SplitArgs, TOCStrat
 
 
 def subproc(cmd):
@@ -71,8 +72,8 @@ def split_txt(args: SplitArgs):
         path = args.infile
         outpath = os.path.dirname(path)
     else:
+        path = args.infile
         outpath = args.outpath
-
 
     outfile = os.path.basename(path)
     outfile, _ = os.path.splitext(outfile)
@@ -95,12 +96,11 @@ def split_txt(args: SplitArgs):
     runargs = e2a.types.RunArgs(
         infile=args.infile,
         outpath=outdir,
-        piper_exe_path="/dev/null",
-        model_file_path="/dev/null",
         toc_strat=args.toc_strat,
         unspace=args.unspace,
         bilingual=False,
-        print_only='full'
+        print_only='full',
+        rm_linearization=args.rm_linearization
     )
 
     toc = e2a.util.get_toc(runargs)
@@ -116,42 +116,15 @@ def split_txt(args: SplitArgs):
         combined += page_txt
         combined += e2a.types.page_char + '\n\n'
 
-    # AllŒh
     with open(outfile, 'w+') as fp:
         fp.write(combined)
-
     return
-
-    path = args.infile
-    outpath = os.path.dirname(path)
-
-    outfile = os.path.basename(path)
-    outfile, _ = os.path.splitext(outfile)
-    outfile = e2a.preprocess.gen_basename(outfile)
-    outfile = outfile + ".txt"
-    outfile = os.path.join(outpath, outfile)
-    logger.info(outfile)
-    #os.makedirs(outdir, exist_ok=True)
-    text = e2a.util.get_text_pdf(args)
-    with open(outfile, 'w+') as fp:
-        fp.write(text)
-    return
-    toc = e2a.util.get_toc_pdf(path)
-    i = 0
-    for toc_item in toc:
-        print(f"{i:4}: {toc_item}")
-        title = toc_item.title.split('.')
-        title = '.'.join(title[:-1])
-        outfile = os.path.join(outdir, title+".txt")
-        with open(outfile, "w+") as fp:
-            fp.write(toc_item.text)
-        #track = TTSTrack(text=text_content, title=toc_item)
-        i += 1
 
 ######################################################################
 
 def run0(args: RunArgs):
     """Perform TTS synthesis"""
+    e2a.get_model.auto_download()
     album, outpath = e2a.util.gen_outpath(args.outpath, args.infile)
     os.makedirs(outpath, exist_ok=True)
     with tempfile.TemporaryDirectory() as tempdir:
@@ -178,7 +151,6 @@ def run0(args: RunArgs):
         if infile.endswith("txt"):
             text = open(infile, 'r').read()
             if text.find(e2a.types.page_char) != -1:
-                #text = e2a.preprocess.preprocess_text(text)
                 chunk_generator = e2a.util.ChunkMethods.get_chunk_by_page(text)
             else:
                 chunk_generator = e2a.util.ChunkMethods.identity_func(text)
@@ -201,22 +173,18 @@ def run0(args: RunArgs):
             chunk_generator,
             outpath,
             album,
-            tempdir,
-            args.piper_exe_path,
-            args.model_file_path
+            tempdir
         )
     return outpath
 
 
 @click.command()
 @dataclass_click(RunArgs)
-def run1(args: RunArgs):
+def do_tts(args: RunArgs):
     """Compute and print table of contents"""
     if args.print_only == 'off':
         return run0(args)
-
     toc = e2a.util.get_toc(args)
-
     for i, toc_item in enumerate(toc):
         if args.print_only == 'name':
             print(f"{i:4}: {toc_item}")
@@ -235,7 +203,8 @@ def cli():
     pass
 
 def e2a_cli():
-    cli.add_command(run1)
+
+    cli.add_command(do_tts)
     cli.add_command(split_txt)
     cli()
     #do_convert()

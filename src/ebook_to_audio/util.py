@@ -16,34 +16,34 @@ import re
 import subprocess as sp
 import sys
 import tempfile
+import warnings
+import wave
+from collections.abc import Iterable
 from itertools import groupby, zip_longest
+from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
-import PyQt5
-from loguru import logger
-
-try:
-    # python 3.10+
-    from collections.abc import Iterable
-except ImportError:
-    # python < 3.10
-    from collections import Iterable
-
-import warnings
-from typing import Callable
-
 import bs4
-import ebook_to_audio as e2a
 import ebooklib
-import epub_toc
+import onnxruntime
 import pandas as pd
 import popplerqt5
+import PyQt5
 import readabilipy as rp
 import readtime
+from ebooklib import epub as ebooklib_epub
+from loguru import logger
+from piper.voice import PiperConfig, PiperVoice
+from platformdirs import user_cache_dir
+
+import ebook_to_audio as e2a
 from ebook_to_audio import types
 from ebook_to_audio.html_split import html_split
 from ebook_to_audio.types import RunArgs
 
+logger.remove()
+logger.add(sys.stdout, level="DEBUG")
 
 def subproc(cmd):
     result = sp.call(cmd.strip(), shell=True)
@@ -63,10 +63,6 @@ def gen_outpath(outpath_parent, infile):
     res = os.path.join(outpath_parent, basename)
     os.makedirs(res, exist_ok=True)
     return basename, res
-
-
-
-
 
 
 
@@ -215,18 +211,7 @@ def convert_to_text(infile, tempdir=None):
 
         infile = infile_pdf
 
-    cmd = f"""
-    pdftotext "{infile}" "{outfile_raw}"
-    """
-    result = subproc(cmd)
-    if result > 0:
-        raise Exception('Failed to convert PDF to text.')
-
-    with open(outfile_raw, 'r') as fp:
-        text = fp.read()
-
-    #text = pdf_test(infile)
-
+    text = pdf_test(infile)
 
     return text
 
@@ -249,8 +234,7 @@ def set_metadata_tag(vid_path, meta):
     return
 
 
-
-def perform_tts(text, outfile, tempdir, piper_exe_path, model_file_path):
+def perform_tts(text, outfile, tempdir, model_name="en_GB-alan-medium.onnx"):
     """
 
     Args:
@@ -259,20 +243,58 @@ def perform_tts(text, outfile, tempdir, piper_exe_path, model_file_path):
         tempdir: A temporary directory to dump files used during
             conversion.
         piper_exe_path: The path to the piper TTS executable.
-        model_file_path: The Piper model file
+        model_name: name of the downloaded model
 
     Returns:
         outfile, the path to the resulting MP3.
     """
-
     outfile_text = os.path.join(tempdir, "outfile_raw.txt")
     with open(outfile_text, "w+") as fp:
         fp.write(text)
     outfile_wav_raw = os.path.join(tempdir, 'outfile_raw.aac')
-    cmd = f"""
-    '{piper_exe_path}' --quiet --model '{model_file_path}' --output_file '{outfile_wav_raw}' < '{outfile_text}'
-    """
-    subproc(cmd)
+    model_file_path = Path(user_cache_dir("ebook_to_audio"))
+    model_file_path = model_file_path / "models" / model_name
+    logger.debug('Loading voice...')
+
+    ##################################################################
+    '''
+    config_path = f"{model_file_path}.json"
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        config_dict = json.load(config_file)
+    cfg = PiperConfig.from_dict(config_dict)
+    cpu_provider_options = {
+        # grow arenas only as needed; helps peak RSS
+        "arena_extend_strategy": "kSameAsRequested",
+        # optional: disable arena entirely (trades perf for lower footprint)
+        # "use_arena": False,
+    }
+
+    so = onnxruntime.SessionOptions()
+    so.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+    so.enable_mem_pattern = False
+    so.intra_op_num_threads = 1
+    so.inter_op_num_threads = 1
+    sesh = onnxruntime.InferenceSession(
+        str(model_file_path),
+        sess_options=so,
+        providers=("CPUExecutionProvider", cpu_provider_options),
+    )
+
+    voice = PiperVoice(
+        config=cfg,
+        session=sesh,
+    )
+    '''
+    ##################################################################
+    voice = PiperVoice.load(model_file_path)
+    ##################################################################
+    wav_file = wave.open(outfile_wav_raw, 'w')
+    logger.debug('synthesizing...')
+
+    
+    audio = voice.synthesize(text, wav_file, sentence_silence=0.1)
+
+    logger.debug('Running ffmpeg...')
     cmd = f"""
     ffmpeg -hide_banner -loglevel error -y -i "{outfile_wav_raw}" -ab 64k "{outfile}"
     """
@@ -318,11 +340,11 @@ def flatten_iter_full(items, parents=[], depth: int = 0):
     """Given an iterable of nested iterables, yield non-iterables via DFS."""
     for x in items:
         if isinstance(x, tuple):
-            assert len(x) == 2 and isinstance(x[0], ebooklib.epub.Section)
+            assert len(x) == 2 and isinstance(x[0], ebooklib_epub.Section)
             parents_x = parents + [x[0]]
             for item0 in flatten_iter_full(x[1], parents=parents_x):
                 yield item0
-        elif isinstance(x, ebooklib.epub.Link):
+        elif isinstance(x, ebooklib_epub.Link):
             yield parents + [x]
         else:
             breakpoint()
@@ -390,7 +412,7 @@ class TOCMethods:
 
             first = True
             html_str = html.content
-            for name, text in html_split(html_str, key, group_ids):
+            for hr, name, text in html_split(html_str, key, group_ids):
                 # The stuff "in the front" (before the first element
                 # referenced by ID) has a path without any fragment.
                 m0 = re.match('(.*)#(.*)', name)
@@ -398,7 +420,7 @@ class TOCMethods:
                     if not first:
                         breakpoint()
                     first = False
-                    items.append((name, text, 0))
+                    items.append((hr, text, 0))
                     continue
                 href_base, href_id = m0.groups()
                 if not href_id == "init" and not href_id in by_id:
@@ -408,8 +430,7 @@ class TOCMethods:
                     index = 0
                 else:
                     index = by_id[href_id]['index'] + 1
-                items.append((name, text, index))
-
+                items.append((hr, text, index))
             # Re-sort by index so that the original order is preserved
             '''
             for name, text,index in items:
@@ -428,13 +449,13 @@ class TOCMethods:
         opts = {
             "ignore_ncx": True
         }
-        book = ebooklib.epub.read_epub(args.infile, options=opts)
+        book = ebooklib_epub.read_epub(args.infile, options=opts)
         tracks = []
 
         def should_skip(item):
-            if isinstance(item, ebooklib.epub.EpubHtml):
+            if isinstance(item, ebooklib_epub.EpubHtml):
                 return False
-            elif isinstance(item, ebooklib.epub.EpubItem):
+            elif isinstance(item, ebooklib_epub.EpubItem):
                 t0 = item.get_type()
                 if t0 == ebooklib.ITEM_UNKNOWN:
                     # .html ends up here
@@ -445,11 +466,24 @@ class TOCMethods:
                     # It is something weird like an image or audio track
                     return True
 
-        for i0 in book.items:
+
+
+        items = book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
+        html_items = {item.get_id(): item for item in items}
+        # Get the items in reading order
+        reading_order = []
+        for idref, _ in book.spine:
+            if idref in html_items:
+                reading_order.append(html_items[idref])
+
+
+        for i0 in reading_order:
             skip = should_skip(i0)
             if skip:
                 print(f'{i0} (skipped)')
                 continue
+
+            ordered = ebooklib_epub.get_pages_for_items([i0])
             print(f'{i0}')
 
             yield i0.id, i0.content
@@ -459,8 +493,8 @@ def get_toc_epub(args: RunArgs):
     opts = {
         "ignore_ncx": True
     }
-    #book = ebooklib.epub.read_epub(args.infile, options=opts)
-    book = ebooklib.epub.read_epub(args.infile)
+    #book = ebooklib_epub.read_epub(args.infile, options=opts)
+    book = ebooklib_epub.read_epub(args.infile)
     infile = args.infile
     title = book.title
     res = None
@@ -490,57 +524,18 @@ def get_toc_epub(args: RunArgs):
 
 
 def pdf_test(infile: str):
-    '''
-    infile = str(args.infile)
-    text = e2a.util.convert_to_text(infile, tempdir=tempdir)
-    text = e2a.preprocess.preprocess_text(text, args.unspace)
-    chunk_generator = e2a.util.ChunkMethods.get_chunk_by_page(text)
-    '''
+    #from pdfminer.high_level import extract_text
+    #text = extract_text(infile)
+    #return text
     import pymupdf
-    import pymupdf4llm
 
+    #import pymupdf4llm
     doc = pymupdf.open(infile)
     text = ""
     for page in doc:
         text += page.get_text()
     doc.close()
-
     return text
-    ##################################################################
-    doc1 = pymupdf.open(args.infile)
-    pagerange = list(range(0,25))
-    data = pymupdf4llm.to_markdown(
-        args.infile,
-        pages=pagerange
-    )
-    splitted = re.split('\\s+\n#+ (.*)', data)
-    for chap in splitted:
-        chap = re.sub('\n\\-\\-\\-\\-\\-', '', chap)
-        print(chap)
-        breakpoint()
-
-    #doc2 = pymupdf4llm.to_markdown(infile)
-    #reader = pymupdf4llm.LlamaMarkdownReader()
-    #data = reader.load_data(infile)
-
-    #data = pymupdf4llm.to_markdown(args.infile, page_chunks=True)
-    #toc_items = [page['toc_items'] for page in data]
-    #toc_items = list(filter(lambda item: item, toc_items))
-
-    for i, page in enumerate(data):
-        toc = page['toc_items']
-        print('#######################################################')
-        print(f"{i:5}: {toc}")
-        print('#######################################################')
-        text0 = page['text']
-        text1 = e2a.preprocess.preprocess_text(text, args.unspace)
-        print(text1)
-        print('#######################################################')
-        #processed1 = e2a.preprocess.pp_remove_newlines(page['text'])
-        breakpoint()
-        pass
-
-    return
 
 
 def get_text_pdfplumber(args: RunArgs):
@@ -629,7 +624,7 @@ class ChunkMethods:
             section = e2a.types.page_char.join(pages[curr_page:page_no])
             curr_page = page_no
             track = e2a.types.TTSTrack(text=section, title=toc_item.title)
-            breakpoint()
+            #breakpoint()
             yield track
 
 
@@ -660,13 +655,7 @@ class ChunkMethods:
 
 ######################################################################
 
-def _convert_text(
-        chunk_generator,
-        outfile,
-        tempdir,
-        piper_exe_path,
-        model_file_path
-):
+def _convert_text(chunk_generator, outfile, tempdir):
     ''' Generates (Track, Outfile) pairs for speech synthesis.'''
     item_num = 0
     for track in chunk_generator:
@@ -681,14 +670,9 @@ def _convert_text(
         track.text = re.sub(types.pg_char, "", track.text)
         track.text = re.sub(types.page_char, "", track.text)
 
-        perform_tts(
-            track.text,
-            outfile,
-            tempdir,
-            piper_exe_path,
-            model_file_path
-        )
-        
+        if not perform_tts(track.text, outfile, tempdir):
+            continue
+
         yield track, outfile
         item_num += 1
 
@@ -697,8 +681,6 @@ def convert_text(
         outpath,
         artist,
         tempdir,
-        piper_exe_path,
-        model_file_path,
         no_metadata=False
 ):
     '''
@@ -706,13 +688,7 @@ def convert_text(
     Supports chunking and Mp3 metadata.
     '''
     outfile = os.path.join(outpath, "raw.mp3")
-    coro = _convert_text(
-        chunk_gen,
-        outfile,
-        tempdir,
-        piper_exe_path,
-        model_file_path
-    )
+    coro = _convert_text(chunk_gen, outfile, tempdir)
     i = 0
     for item_num, (track, tmpfile) in enumerate(coro):
         zfilled = f"{item_num+1}".zfill(6)

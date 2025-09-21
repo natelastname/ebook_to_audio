@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Annotated
 
 import click
-from dataclass_click import argument, dataclass_click, option, register_type_inference
+from dataclass_click import (argument, dataclass_click, option,
+                             register_type_inference)
 from pydantic import BaseModel
 
 sentence_char = "∙"
@@ -45,8 +46,6 @@ class SplitArgs:
 class RunArgs:
     infile: Annotated[Path, option()]
     outpath: Annotated[Path, option()]
-    piper_exe_path: Annotated[Path, option()]
-    model_file_path: Annotated[Path, option()]
     toc_strat: Annotated[TOCStrat, option(default='default')]
     unspace: Annotated[bool, option(default=False)]
     bilingual: Annotated[bool, option(default=False)]
