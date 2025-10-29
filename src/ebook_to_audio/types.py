@@ -5,79 +5,98 @@ Created on 2025-03-04T20:37:24-05:00
 
 @author: nate
 """
+from __future__ import annotations
+
+import argparse
 import re
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Iterable, Optional
 
-import click
-from dataclass_click import (argument, dataclass_click, option,
-                             register_type_inference)
 from pydantic import BaseModel
 
+# ----------------------------- Constants ------------------------------
+
 sentence_char = "∙"
-pg_char = '¶'
+pg_char = "¶"
 page_char = "📄"
-hline_char = '✂'
-toc_item_char = '⁉️'
+hline_char = "✂"
+toc_item_char = "⁉️"
 
-StratsOther = ['default']
-StratsEpub = ['fname', 'title', 'html_items']
-StratsPdf = ['pdf_page', 'cpn_pdf_toc']
-TOCStrat = click.Choice(StratsOther+StratsEpub+StratsPdf)
+# ----------------------------- Enums ----------------------------------
 
-PrintOnly = click.Choice(['off', 'name', 'full'])
+class TOCStrat(Enum):
+    # Other
+    DEFAULT = "default"
+    # EPUB
+    EPUB_FNAME = "fname"
+    EPUB_TITLE = "title"
+    EPUB_HTML_ITEMS = "html_items"
+    # PDF
+    PDF_PAGE = "pdf_page"
+    PDF_CPN_TOC = "cpn_pdf_toc"
+
+    def __str__(self) -> str:
+        return self.value
+
+class RunMode(Enum):
+    NORMAL = "NORMAL"
+    DRY_RUN_TOC = "DRY_RUN_TOC"
+    DRY_RUN_FULL = "DRY_RUN_FULL"
+
+    def __str__(self) -> str:
+        return self.value
 
 
-register_type_inference(TOCStrat, TOCStrat)
-register_type_inference(PrintOnly, PrintOnly)
-
+# ----------------------------- Dataclasses ----------------------------
 
 @dataclass
 class SplitArgs:
-    infile: Annotated[Path, option()]
-    outpath: Annotated[Path, option(default=None)]
-    toc_strat: Annotated[TOCStrat, option(default='default')]
-    unspace: Annotated[bool, option(default=False)]
-    rm_linearization: Annotated[bool, option(default=False)]
-
+    infile: Path
+    outpath: Optional[Path] = None
+    toc_strat: TOCStrat = TOCStrat.DEFAULT
+    unspace: bool = False
+    rm_linearization: bool = False
 
 @dataclass
 class RunArgs:
-    infile: Annotated[Path, option()]
-    outpath: Annotated[Path, option()]
-    toc_strat: Annotated[TOCStrat, option(default='default')]
-    unspace: Annotated[bool, option(default=False)]
-    bilingual: Annotated[bool, option(default=False)]
-    print_only: Annotated[PrintOnly, option(default='off')]
-    rm_linearization: Annotated[bool, option(default=False)]
+    infile: Path
+    outpath: Optional[Path]
+    toc_strat: TOCStrat = TOCStrat.DEFAULT
+    unspace: bool = False
+    bilingual: bool = False
+    run_mode: RunMode = RunMode.NORMAL
+    rm_linearization: bool = False
+    gen_lrc: bool = True
 
-def elide_text(string, max):
-    trunc = re.sub('\n+\\W*', '⮐', string)
-    trunc = trunc.replace('\x0c', '')
-    if len(trunc) <= max:
+# ----------------------------- Utils ----------------------------------
+
+def elide_text(string: Optional[str], max_len: int) -> str:
+    if not string:
+        return ""
+    # Collapse blank lines + surrounding non-words; map form-feed to nothing.
+    trunc = re.sub(r"\n+\W*", "⮐", string.replace("\x0c", ""))
+    if len(trunc) <= max_len:
         return trunc
-    trunc = trunc[0:max-1] + "…"
-    return trunc
+    return trunc[: max_len - 1] + "…"
 
+# ----------------------------- Models ---------------------------------
 
 class TTSTrack(BaseModel):
     text: str = ""
-    title: str | None = None
+    title: Optional[str] = None
 
-
-    def __str__(self):
+    def __str__(self) -> str:
         trunc1 = elide_text(self.title, 48)
-        trunc2 = elide_text(self.text, 48)
-        #s0 = f"TTSTrack({trunc1}, {trunc2})"
-        text0 = re.sub('\n', f'{sentence_char}\n', self.text)
-        s0 = ""
-        s0 += '#####################################################\n'
-        s0 += f"TITLE: '{trunc1}'\n"
-        s0 += '#####################################################\n'
-        s0 += text0 + ('\n' if text0 and text0[-1] != '\n' else '')
-        s0 += '####################################################'
-        return s0
+        text0 = re.sub(r"\n", f"{sentence_char}\n", self.text or "")
+        s0 = []
+        s0.append("#####################################################")
+        s0.append(f"TITLE: '{trunc1}'")
+        s0.append("#####################################################")
+        s0.append(text0 + ("" if (not text0 or text0.endswith("\n")) else "\n"))
+        s0.append("####################################################")
+        return "\n".join(s0)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.__str__()

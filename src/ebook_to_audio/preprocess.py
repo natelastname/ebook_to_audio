@@ -192,12 +192,47 @@ def pp_break_paragraphs(text):
     return text
 
 def pp_fix_formfeeds(text):
+
+    # Pre-compile for speed if you call this a lot
+    _SOFT_OR_ZERO_WIDTH = re.compile(r'[\u00AD\u200B\u200C\u200D]')  # soft hyphen & zero-widths
+    # Hyphen-like chars that are used for word breaks (not em/en dashes)
+    _WORD_HYPHEN = r'[-\u2010\u2011\u00AD]'  # -, hyphen, non-breaking hyphen, soft hyphen
+    # 1) Join hyphenated words that break across newline or form-feed
+    _JOIN_HYPHEN_BREAK = re.compile(
+        rf'(\w){_WORD_HYPHEN}\s*(?:\r?\n|\r|\x0c)\s*(?=[A-Za-z])'
+    )
+    # 2) Replace any whitespace + form-feed + whitespace with a paragraph break
+    _FORMFEED_TO_PARA = re.compile(r'\s*\x0c+\s*')
+    # 3) Normalize multiple blank lines and excess spaces
+    _MULTIBLANKS = re.compile(r'\n{3,}')
+    _MULTISPACES = re.compile(r'[ \t]{2,}')
+    # Normalize line endings early
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    # Remove soft/zero-width characters that confuse tokenization/tts
+    text = _SOFT_OR_ZERO_WIDTH.sub('', text)
+    # Join hyphenated words that were split by newline or form-feed:
+    # "inter-\n national" -> "international", "co-\x0c operate" -> "cooperate"
+    text = _JOIN_HYPHEN_BREAK.sub(r'\1', text)
+    # Convert form-feeds to paragraph breaks; this keeps a pause for TTS
+    text = _FORMFEED_TO_PARA.sub('\n\n', text)
+    # Collapse silly spacing
+    text = _MULTIBLANKS.sub('\n\n', text)
+    text = _MULTISPACES.sub(' ', text)
+
+    return text
+
+    # Optional: ensure space around em/en dashes so TTS pauses naturally
+    # text = re.sub(r'\s*([\u2012\u2013\u2014])\s*', r' \1 ', text)
+
+
+
     # Remove line-end hyphens
     text = re.sub('\\S[—-]\\s+\\S', '', text)
     # if the page break breaks a line, delete all whitespace
     text = re.sub('-\\s*\x0c\\s*', '\x0c', text)
     # If the page break is at a word boundary, leave a space
     text = re.sub('-?\\s*\x0c\\s*', ' \x0c', text)
+    breakpoint()
     return text
 
 

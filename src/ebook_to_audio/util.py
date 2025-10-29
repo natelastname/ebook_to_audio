@@ -9,6 +9,7 @@ from __future__ import unicode_literals
 
 import atexit
 import datetime
+import datetime as dt
 import functools
 import json
 import os
@@ -16,34 +17,77 @@ import re
 import subprocess as sp
 import sys
 import tempfile
-import warnings
 import wave
 from collections.abc import Iterable
 from itertools import groupby, zip_longest
 from pathlib import Path
-from typing import Callable
-from urllib.parse import urlparse
 
-import bs4
+import ebook_to_audio as e2a
 import ebooklib
-import onnxruntime
-import pandas as pd
-import popplerqt5
-import PyQt5
-import readabilipy as rp
+import mutagen.mp3
+import numpy as np
+import pymupdf
 import readtime
+from ebook_to_audio import types
+from ebook_to_audio.html_split import html_split
+from ebook_to_audio.types import RunArgs, RunMode, SplitArgs, TOCStrat
 from ebooklib import epub as ebooklib_epub
 from loguru import logger
+from mutagen.id3 import ID3, SYLT, Encoding
+from PIL import Image
 from piper.voice import PiperConfig, PiperVoice
 from platformdirs import user_cache_dir
 
-import ebook_to_audio as e2a
-from ebook_to_audio import types
-from ebook_to_audio.html_split import html_split
-from ebook_to_audio.types import RunArgs
-
 logger.remove()
-logger.add(sys.stdout, level="DEBUG")
+logger.add(sys.stdout, level="INFO")
+
+def format_timestamp(seconds: float) -> str:
+    """Convert seconds (float) to LRC timestamp format [mm:ss.xx]."""
+    minutes = int(seconds // 60)
+    secs = seconds - (minutes*60)
+
+    rem = int((secs - int(secs))*100)
+    secs = int(secs)
+    ts0 = f"[{minutes:02d}:{secs:02d}.{rem:02d}]"
+    return ts0
+
+def sylt_to_lrc(title: str, artist: str, mp3_file):
+    lrc_file, _ = os.path.splitext(mp3_file)
+    lrc_file = lrc_file + ".lrc"
+    # Load MP3 and read ID3 tags
+    audio = ID3(mp3_file)
+    sylt_frames = audio.getall("SYLT")
+    # Open LRC file for writing
+    with open(lrc_file, 'w', encoding='utf-8') as f:
+        # Optional: Add LRC metadata (title, artist, etc.)
+        f.write(f"[ti: {title}]\n")
+        f.write(f"[ar: {artist}]\n")
+        f.write("\n")
+        for sylt in sylt_frames:
+            for text, timestamp in sylt.text:
+                lrc_time = format_timestamp(timestamp/1000)
+                line = f"{lrc_time} {text}\n"
+                f.write(line)
+    return
+
+def concat_audio_wave(audio_clip_paths, output_path):
+    data = []
+    for clip in audio_clip_paths:
+        w = wave.open(clip, "rb")
+        data.append([w.getparams(), w.readframes(w.getnframes())])
+        w.close()
+    output = wave.open(output_path, "wb")
+    output.setparams(data[0][0])
+    for i in range(len(data)):
+        output.writeframes(data[i][1])
+    output.close()
+
+def get_wav_duration(file_path):
+    with wave.open(file_path, 'rb') as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate()
+        duration = frames / float(rate)
+    return duration
 
 def subproc(cmd):
     result = sp.call(cmd.strip(), shell=True)
@@ -64,22 +108,16 @@ def gen_outpath(outpath_parent, infile):
     os.makedirs(res, exist_ok=True)
     return basename, res
 
-
-
 def mix_images(images):
-    import numpy as np
-    from PIL import Image
     sizes = [img.size for img in images]
     if len(set(sizes)) > 1:
         raise ValueError("All images must have the same dimensions")
-
     arrays = [np.array(img, dtype=np.float32) for img in images]
     # Compute the average across all images
     mixed_array = np.mean(arrays, axis=0)
     # Convert back to uint8 and create PIL image
     mixed_image = Image.fromarray(mixed_array.astype(np.uint8))
     return mixed_image
-
 
 def make_temp_dir():
     tempdir = tempfile.mkdtemp(prefix="e2a.", dir='/tmp')
@@ -90,111 +128,17 @@ def make_temp_dir():
     atexit.register(delete_func)
     return  tempdir
 
-
-def split_pdf_page(pdf_path):
-    import pdfplumber
-    from PIL import Image
-    from rich.progress import track
-
-    with tempfile.TemporaryDirectory() as tempdir:
-        with pdfplumber.open(pdf_path) as pdf:
-            i = 0
-            for page in track(pdf.pages):
-                im = page.to_image(resolution=300)
-                dest = f"{str(i).zfill(6)}.png"
-                dest = os.path.join(tempdir, dest)
-                im.save(dest=dest)
-                if i > 20:
-                    break
-                i += 1
-
-            logger.info('Loading images...')
-            width = 0
-            height = 0
-            images = []
-
-            i = 0
-            #for image_path in track(os.scandir(tempdir)):
-            for image_path in os.scandir(tempdir):
-                image = Image.open(image_path).convert('RGBA')
-                w0, h0 = image.size
-                if w0 > width:
-                    width = w0
-                if h0 > height:
-                    height = h0
-                images.append(image)
-                #logger.info(f'{i:5}/{len(pdf.pages):5}')
-
-                i += 1
-            logger.info('Merging images...')
-
-            bg_color = (0, 0, 0, 0)
-            merged_image = Image.new('RGBA', (width, height), bg_color )
-            new_images = []
-            for image in images:
-                #alpha_channel = merged_image.split()[3].point(lambda p: alpha)
-                #image.putalpha(alpha_channel)
-                padded_img = Image.new('RGBA', (width, height), bg_color )
-                padded_img.paste(image, (0, 0), image)
-                new_images.append(padded_img)
-
-            img0 = mix_images(new_images)
-
-            breakpoint()
-
-
-        for page in pdf.pages:
-            # Define regions (adjust coordinates based on your PDF)
-            top = 100
-            bottom = 100
-            header = page.crop((0, 0, page.width, 100))  # Top 100px
-            body = page.crop((0, 100, page.width, page.height - 100))  # Middle
-            footer = page.crop((0, page.height - 100, page.width, page.height))  # Bottom 100px
-
-            logger.info('header:')
-            logger.info('body:')
-            logger.info('footer:')
-            breakpoint()
-
-def pdf_to_text(pdf_path, num_pages: int | None = None):
-    import pdfminer.layout
-    from pdfminer.high_level import extract_pages
-    from pdfminer.layout import LTTextBoxHorizontal
-    out_text = ""
-    pages = []
-    for i, page_layout in enumerate(extract_pages(pdf_path)):
-        page = ""
-        if num_pages and i > num_pages:
-            break
-        breakon = False
-        types = []
-        elts = []
-        boxes = []
-        for i, element in enumerate(page_layout):
-            if not isinstance(element, pdfminer.layout.LTTextBoxHorizontal):
-                continue
-            text = element.get_text()
-            text = e2a.preprocess.pp_normalize_whitespace(text)
-            lines = text.strip().split('\n')
-            # Skip text that matches typical page number patterns
-            #print(f'[{i:4}] {text}')
-
-            boxes = boxes + [l0.strip() for l0 in lines]
-
-            page += text
-            elts.append(element)
-
-
-        print(json.dumps(boxes, indent=2))
-        pages.append(boxes)
-        out_text += page + "\x0c"
-
-    return out_text
+def pdf_test(infile: str):
+    doc = pymupdf.open(infile)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    doc.close()
+    return text
 
 def convert_to_text(infile, tempdir=None):
     if not tempdir:
         tempdir = make_temp_dir()
-
     outfile = os.path.join(tempdir, 'output.txt')
     outfile_raw = os.path.join(tempdir, 'output_raw.txt')
     infile_pdf = os.path.join(tempdir, 'input.pdf')
@@ -208,11 +152,8 @@ def convert_to_text(infile, tempdir=None):
         result = subproc(cmd)
         if result > 0:
             raise Exception('Failed to convert fle to PDF.')
-
         infile = infile_pdf
-
     text = pdf_test(infile)
-
     return text
 
 ######################################################################
@@ -233,77 +174,28 @@ def set_metadata_tag(vid_path, meta):
     subproc(cmd)
     return
 
+def get_piper_voice(model_name="en_GB-alan-medium.onnx"):
+    logger.debug('Loading voice...')
 
-def perform_tts(text, outfile, tempdir, model_name="en_GB-alan-medium.onnx"):
-    """
+    model_file_path = Path(user_cache_dir("ebook_to_audio"))
+    model_file_path = model_file_path / "models" / model_name
+    voice = PiperVoice.load(model_file_path)
+    return voice
 
-    Args:
-        text: The text to convert.
-        outfile: The output mp3.
-        tempdir: A temporary directory to dump files used during
-            conversion.
-        piper_exe_path: The path to the piper TTS executable.
-        model_name: name of the downloaded model
-
-    Returns:
-        outfile, the path to the resulting MP3.
-    """
+def perform_tts(text, outfile, tempdir, voice):
     outfile_text = os.path.join(tempdir, "outfile_raw.txt")
     with open(outfile_text, "w+") as fp:
         fp.write(text)
     outfile_wav_raw = os.path.join(tempdir, 'outfile_raw.aac')
-    model_file_path = Path(user_cache_dir("ebook_to_audio"))
-    model_file_path = model_file_path / "models" / model_name
-    logger.debug('Loading voice...')
-
-    ##################################################################
-    '''
-    config_path = f"{model_file_path}.json"
-    with open(config_path, "r", encoding="utf-8") as config_file:
-        config_dict = json.load(config_file)
-    cfg = PiperConfig.from_dict(config_dict)
-    cpu_provider_options = {
-        # grow arenas only as needed; helps peak RSS
-        "arena_extend_strategy": "kSameAsRequested",
-        # optional: disable arena entirely (trades perf for lower footprint)
-        # "use_arena": False,
-    }
-
-    so = onnxruntime.SessionOptions()
-    so.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
-    so.enable_mem_pattern = False
-    so.intra_op_num_threads = 1
-    so.inter_op_num_threads = 1
-    sesh = onnxruntime.InferenceSession(
-        str(model_file_path),
-        sess_options=so,
-        providers=("CPUExecutionProvider", cpu_provider_options),
-    )
-
-    voice = PiperVoice(
-        config=cfg,
-        session=sesh,
-    )
-    '''
-    ##################################################################
-    voice = PiperVoice.load(model_file_path)
-    ##################################################################
     wav_file = wave.open(outfile_wav_raw, 'w')
     logger.debug('synthesizing...')
-
-    
     audio = voice.synthesize(text, wav_file, sentence_silence=0.1)
-
     logger.debug('Running ffmpeg...')
     cmd = f"""
     ffmpeg -hide_banner -loglevel error -y -i "{outfile_wav_raw}" -ab 64k "{outfile}"
     """
     subproc(cmd)
     return outfile
-
-######################################################################
-
-######################################################################
 
 def _get_chunk_by_time(text0, seconds):
     '''
@@ -323,8 +215,6 @@ def _get_chunk_by_time(text0, seconds):
         if time >= interval:
             return chunk, rest
     return text0, ''
-
-
 
 def flatten_iter(items, depth: int = 0):
     """Given an iterable of nested iterables, yield non-iterables via DFS."""
@@ -349,25 +239,9 @@ def flatten_iter_full(items, parents=[], depth: int = 0):
         else:
             breakpoint()
 
-def check_coverage(found, book):
-    for link in flatten_iter(book.toc):
-        href = link.href
-        href_base, href_id = re.match('(.*)#?(.*)', href).groups()
-
-        if href not in found:
-            # We did not find this
-            print("Not encountered:")
-            pass
-
-        breakpoint()
-        pass
-
 class TOCMethods:
     @staticmethod
     def by_title(args: RunArgs, book):
-        # TODO: Detect duplication
-
-        counter = 0
         for items in flatten_iter_full(book.toc):
             title = '/'.join([i0.title for i0 in items])
             last = items[-1]
@@ -380,13 +254,9 @@ class TOCMethods:
 
     @staticmethod
     def by_fname(args: RunArgs, book):
-        # TODO: Detect duplication
-        contents = [elm.content for elm in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)]
-
         items = []
         for i, item in enumerate(flatten_iter(book.toc)):
             href = item.href
-            doc = book.get_item_with_href(href)
             doc_path = ""
             doc_id = ""
             m0 = re.match('(.*)#(.*)', item.href)
@@ -466,8 +336,6 @@ class TOCMethods:
                     # It is something weird like an image or audio track
                     return True
 
-
-
         items = book.get_items_of_type(ebooklib.ITEM_DOCUMENT)
         html_items = {item.get_id(): item for item in items}
         # Get the items in reading order
@@ -499,19 +367,19 @@ def get_toc_epub(args: RunArgs):
     title = book.title
     res = None
 
-    if args.toc_strat == "default":
+    if args.toc_strat == TOCStrat.DEFAULT:
         res = TOCMethods.html_items(args)
-    elif args.toc_strat == "fname":
+    elif args.toc_strat == TOCStrat.EPUB_FNAME:
         res = TOCMethods.by_fname(args, book)
-    elif args.toc_strat == "title":
+    elif args.toc_strat == TOCStrat.EPUB_TITLE:
         res = TOCMethods.by_title(args, book)
-    elif args.toc_strat == "html_items":
+    elif args.toc_strat == TOCStrat.EPUB_HTML_ITEMS:
         res = TOCMethods.html_items(args)
     else:
-        raise NotImplementedError(strat)
+        raise NotImplementedError(args.toc_strat)
 
     for title, content in res:
-        if args.print_only == 'name':
+        if args.run_mode == 'name':
             track = e2a.types.TTSTrack(title=title, text='')
             yield track
             continue
@@ -523,73 +391,23 @@ def get_toc_epub(args: RunArgs):
         yield track
 
 
-def pdf_test(infile: str):
-    #from pdfminer.high_level import extract_text
-    #text = extract_text(infile)
-    #return text
-    import pymupdf
-
-    #import pymupdf4llm
-    doc = pymupdf.open(infile)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    doc.close()
-    return text
-
-
-def get_text_pdfplumber(args: RunArgs):
-    import pdfplumber
-    with pdfplumber.open(str(args.infile)) as pdf:
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            im = page.to_image()
-            logger.info(f'##### Page {i}')
-            logger.info(f'Lines: {len(page.lines)}')
-            im.draw_rects(page.extract_words())
-            im.draw_lines(page.lines)
-
-
-
-######################################################################
-# Get text methods
-######################################################################
-
-def get_text_pdf(args: RunArgs):
-    #with tempfile.TemporaryDirectory() as tempdir:
-
-    ##############################################################
-    # It is anticipated that multiple pdf2text methods will be
-    # required for different situations.
-    ##############################################################
-    PDF_TO_TEXT_MODE = "Poppler"
-    if PDF_TO_TEXT_MODE == "Poppler":
-        text = e2a.get_pdf_text.get_text_poppler_line_split(args)
-    else:
-        breakpoint()
-
-    text = e2a.preprocess.preprocess_text_lite(text, args.unspace)
-
-    return text
-
 def get_toc_pdf(args: RunArgs):
-    text = get_text_pdf(args)
+    text = e2a.get_pdf_text.get_text_poppler_line_split(args)
+    text = e2a.preprocess.preprocess_text_lite(text, args.unspace)
     res = None
-    if args.toc_strat == "default":
+    if args.toc_strat == TOCStrat.DEFAULT:
         res = e2a.util.ChunkMethods.get_chunk_by_page(text)
-    elif args.toc_strat == "cpn_pdf_toc":
+    elif args.toc_strat == TOCStrat.PDF_CPN_TOC:
         res = e2a.util.ChunkMethods.cpn_pdf_toc(args, text)
-    elif args.toc_strat == "pdf_page":
+    elif args.toc_strat == TOCStrat.PDF_PAGE:
         res = e2a.util.ChunkMethods.get_chunk_by_page(text)
     else:
-        raise NotImplementedError(strat)
-
+        raise NotImplementedError(args.toc_strat)
     for track in res:
-        if args.print_only == 'name':
+        if args.run_mode == 'name':
             track = e2a.types.TTSTrack(title=track.title, text='')
             yield track
             continue
-
         yield track
 
 def get_toc(args: RunArgs):
@@ -619,15 +437,11 @@ class ChunkMethods:
             page_no = toc_item.ld.pageNumber()
             left = f"{page_no:6}: {space}"
             print(left+toc_item.title)
-
-
             section = e2a.types.page_char.join(pages[curr_page:page_no])
             curr_page = page_no
             track = e2a.types.TTSTrack(text=section, title=toc_item.title)
             #breakpoint()
             yield track
-
-
 
     @staticmethod
     def identity_func(text):
@@ -646,7 +460,6 @@ class ChunkMethods:
     def get_chunk_by_page(text0):
         page_num = 0
         pages = re.split(e2a.types.page_char, text0)
-
         for i, page in enumerate(pages):
             page_num += 1
             track = e2a.types.TTSTrack(text=page, title=f"p. {page_num}")
@@ -655,60 +468,122 @@ class ChunkMethods:
 
 ######################################################################
 
-def _convert_text(chunk_generator, outfile, tempdir):
-    ''' Generates (Track, Outfile) pairs for speech synthesis.'''
-    item_num = 0
+def generate_with_sylt(
+        text,
+        outfile,
+        tempdir
+):
+    logger.info("Running...")
+    lyrics = []
+    curr_time = 0
+    out_sents = []
+    lines = re.split(f'\n+', text.strip())
+    outfile_temp, _ = os.path.splitext(outfile)
+
+    outfile_temp_1 = outfile_temp + ".tmp1.wav"
+    if os.path.isfile(outfile_temp_1):
+        os.unlink(outfile_temp_1)
+
+    outfile_temp_2 = outfile_temp + ".tmp2.wav"
+    if os.path.isfile(outfile_temp_2):
+        os.unlink(outfile_temp_2)
+
+    voice = get_piper_voice()
+
+    for line in lines:
+        print(line)
+        line0 = line
+        with tempfile.TemporaryDirectory() as tempdir:
+
+            outfile0 = os.path.join(tempdir, 'sent0.wav')
+            e2a.util.perform_tts(line0, outfile0, tempdir, voice)
+            if not os.path.isfile(outfile0):
+                print("skipped")
+                continue
+
+            duration0 = get_wav_duration(outfile0)
+            duration0 = int(duration0 * 1000)
+
+            lyrics.append((line0, curr_time))
+            #logger.info(f"[{round(curr_time,3):8}, {line0}")
+            curr_time += duration0
+
+            if os.path.isfile(outfile_temp_1):
+                concat_audio_wave([outfile_temp_1, outfile0], outfile_temp_2)
+                e2a.util.subproc(f"mv '{outfile_temp_2}' '{outfile_temp_1}'")
+            else:
+                concat_audio_wave([outfile0], outfile_temp_1)
+
+
+    cmd = f"""
+    ffmpeg -hide_banner -loglevel error -y -i "{outfile_temp_1}" -ab 64k "{outfile}"
+    """
+    e2a.util.subproc(cmd)
+    if os.path.isfile(outfile_temp):
+        os.unlink(outfile)
+
+    m0 = mutagen.mp3.MP3(outfile)
+    if m0.tags is None:
+        m0.tags = mutagen.id3.ID3()
+
+    # save ID3v2.3 only without ID3v1 (default is ID3v2.4)
+    m0.save(v1=0, v2_version=3)
+
+    audio = ID3(outfile)
+    meta = SYLT(encoding=Encoding.UTF8, lang='eng', format=2, type=1, text=lyrics)
+    audio.add(meta)
+    audio.save(v2_version=3)
+
+    return outfile
+
+
+def _convert_text(chunk_generator, outfile_mp3: str, tempdir: str, gen_lrc: bool=True):
+    """Yield (track, final_mp3_path) after synthesis."""
     for track in chunk_generator:
         if not isinstance(track, e2a.types.TTSTrack):
-            raise Exception("Chunk_generator yielded non-Track instance")
+            raise TypeError("chunk_generator yielded non-TTSTrack")
 
         print("###########################################################")
         print(track.text)
         print("###########################################################")
 
-        track.text = re.sub(types.sentence_char, "", track.text)
-        track.text = re.sub(types.pg_char, "", track.text)
-        track.text = re.sub(types.page_char, "", track.text)
+        # Strip control chars
+        for ch in (e2a.types.sentence_char, e2a.types.pg_char, e2a.types.page_char):
+            track.text = track.text.replace(ch, "")
 
-        if not perform_tts(track.text, outfile, tempdir):
-            continue
+        if gen_lrc:
+            generate_with_sylt(track.text, outfile_mp3, tempdir)
+        else:
+            perform_tts(track.text, outfile_mp3, tempdir)
 
-        yield track, outfile
-        item_num += 1
+        yield track, outfile_mp3
 
 def convert_text(
-        chunk_gen,
-        outpath,
-        artist,
-        tempdir,
-        no_metadata=False
-):
-    '''
-    Perform text to speech synthesis.
-    Supports chunking and Mp3 metadata.
-    '''
-    outfile = os.path.join(outpath, "raw.mp3")
-    coro = _convert_text(chunk_gen, outfile, tempdir)
-    i = 0
-    for item_num, (track, tmpfile) in enumerate(coro):
-        zfilled = f"{item_num+1}".zfill(6)
-        final_outfile = f"{zfilled}.mp3"
-        final_outfile = os.path.join(os.path.dirname(tmpfile), final_outfile)
-        dt0 = datetime.datetime.now()
-        desc = f"Created {dt0.isoformat(timespec='minutes')}"
+    chunk_gen,
+    outpath: str,
+    artist: str,
+    tempdir: str,
+    no_metadata: bool = False,
+    gen_lrc: bool = True,
+) -> None:
+    outdir = Path(outpath)
+    outdir.mkdir(parents=True, exist_ok=True)
+    tmp_mp3 = outdir / "raw.mp3"
+    gen0 = _convert_text(chunk_gen, str(tmp_mp3), tempdir, gen_lrc=gen_lrc)
 
-        metadata = {
-            'artist': artist,
-            'title': f"{zfilled} {track.title}",
-            'album': artist,
-            'track': item_num + 1,
-            'description': desc
+    for item_num, (track, _) in enumerate(gen0, start=1):
+        z = f"{item_num:06d}"
+        final_mp3 = outdir / f"{z}.mp3"
+        meta = {
+            "artist": artist,
+            "title": f"{z} {track.title}",
+            "album": artist,
+            "track": item_num,
+            "description": f"Created {dt.datetime.now().isoformat(timespec='minutes')}",
         }
         if not no_metadata:
-            set_metadata_tag(tmpfile, metadata)
-        cmd = f"""
-        mv '{outfile}' '{final_outfile}'
-        """
-        subproc(cmd)
-        i = i + 1
-    return
+            set_metadata_tag(str(tmp_mp3), meta)
+
+        tmp_mp3.rename(final_mp3)
+        if gen_lrc:
+            sylt_to_lrc(meta['title'], meta['artist'], final_mp3)

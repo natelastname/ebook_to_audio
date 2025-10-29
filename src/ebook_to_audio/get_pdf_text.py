@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 import bs4
 import crawlpdfnames as cpn
 import cv2
+import ebook_to_audio as e2a
 import ebooklib
 import numpy as np
 import pandas as pd
@@ -34,15 +35,13 @@ import PyQt5
 import readabilipy as rp
 import readtime
 import tqdm
+from ebook_to_audio import types
+from ebook_to_audio.html_split import html_split
+from ebook_to_audio.types import RunArgs
 from loguru import logger
 from PIL import Image
 from PyQt5.QtCore import QBuffer
 from PyQt5.QtGui import QImage
-
-import ebook_to_audio as e2a
-from ebook_to_audio import types
-from ebook_to_audio.html_split import html_split
-from ebook_to_audio.types import RunArgs
 
 
 def _get_page_text(page):
@@ -52,8 +51,6 @@ def _get_page_text(page):
     return page.text(r0)
 
 def get_text_poppler(args: RunArgs):
-    #splitted = e2a.util.split_pdf_page(str(args.infile))
-    #text = e2a.util.pdf_to_text(str(args.infile))
     doc = popplerqt5.Poppler.Document.load(str(args.infile))
     text = ""
     for i in range(0, doc.numPages()):

@@ -14,11 +14,10 @@ import wave
 
 import argostranslate.package
 import argostranslate.translate
+import ebook_to_audio as e2a
 import mutagen.mp3
 from loguru import logger
 from mutagen.id3 import ID3, SYLT, Encoding
-
-import ebook_to_audio as e2a
 
 # Why does this sentence not translate from english to spanish?
 # ’He was educated Upper Canada College, Toronto, at Eton, at the University of Strasbourg and, after a spell of National Service in the Navy, at New College, Oxford, where he took a degree in French and Russian.’
